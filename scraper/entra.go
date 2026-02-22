@@ -1,0 +1,581 @@
+package scraper
+
+import (
+	"encoding/base64"
+	"fmt"
+
+	"github.com/flanksource/commons/logger"
+	v1 "github.com/flanksource/config-db/api/v1"
+	"github.com/flanksource/duty/models"
+	"github.com/flanksource/duty/types"
+	"github.com/google/uuid"
+	graphcore "github.com/microsoftgraph/msgraph-sdk-go-core"
+	"github.com/microsoftgraph/msgraph-sdk-go/applications"
+	msgraphModels "github.com/microsoftgraph/msgraph-sdk-go/models"
+	"github.com/microsoftgraph/msgraph-sdk-go/serviceprincipals"
+	"github.com/microsoftgraph/msgraph-sdk-go/users"
+	"github.com/samber/lo"
+)
+
+const (
+	IncludeAuthMethods = "authMethods"
+	IncludeAppRoles    = "appRoles"
+	IncludeEntra       = "entra"
+)
+
+const EnterpriseApplicationType = "EnterpriseApplication"
+
+func (s *Scraper) scrapeEntra() (v1.ScrapeResults, error) {
+	if !s.config.Includes(IncludeEntra) {
+		return nil, nil
+	}
+
+	if s.config.Entra == nil {
+		s.config.Entra = &v1.Entra{}
+	}
+
+	results := v1.ScrapeResults{}
+	results = append(results, s.fetchUsers(s.config.Entra.Users)...)
+	results = append(results, s.fetchGroups(s.config.Entra.Groups)...)
+	results = append(results, s.fetchAppRegistrations(s.config.Entra.AppRegistrations)...)
+	results = append(results, s.fetchEnterpriseApplications(s.config.Entra.EnterpriseApps)...)
+	results = append(results, s.fetchAllAppRoleAssignments(s.config.Entra.AppRoleAssignments)...)
+	results = append(results, s.fetchAuthMethods()...)
+	return results, nil
+}
+
+func (s *Scraper) fetchUsers(selectors types.ResourceSelectors) v1.ScrapeResults {
+	if len(selectors) == 0 {
+		return nil
+	}
+
+	logger.Tracef("fetching users for tenant %s", s.config.TenantID)
+
+	var results v1.ScrapeResults
+
+	queryParams := &users.UsersRequestBuilderGetQueryParameters{
+		Select: []string{"id", "displayName", "givenName", "mail", "createdDateTime", "deletedDateTime"},
+	}
+	requestConfig := &users.UsersRequestBuilderGetRequestConfiguration{
+		QueryParameters: queryParams,
+	}
+
+	usersResult, err := s.graphClient.Users().Get(s.ctx, requestConfig)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to fetch users: %w", err)})
+	}
+
+	pageIterator, err := graphcore.NewPageIterator[msgraphModels.Userable](usersResult, s.graphClient.GetAdapter(), nil)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to create page iterator: %w", err)})
+	}
+
+	err = pageIterator.Iterate(s.ctx, func(user msgraphModels.Userable) bool {
+		scrapeResult, err := s.userToScrapeResult(user, selectors)
+		if err != nil {
+			logger.Errorf("failed to convert user to scrape result: %v", err)
+			return true
+		} else if len(scrapeResult.ExternalUsers) > 0 {
+			results = append(results, scrapeResult)
+		}
+		return true
+	})
+
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to iterate through pages: %w", err)})
+	}
+
+	return results
+}
+
+func (s *Scraper) userToScrapeResult(user msgraphModels.Userable, selector types.ResourceSelectors) (v1.ScrapeResult, error) {
+	displayName := *user.GetDisplayName()
+
+	userID, err := uuid.Parse(lo.FromPtr(user.GetId()))
+	if err != nil {
+		return v1.ScrapeResult{}, err
+	}
+
+	scraperID := uuid.Nil
+	if s.scraperID != "" {
+		scraperID = uuid.MustParse(s.scraperID)
+	}
+
+	externalUser := models.ExternalUser{
+		ID:        userID,
+		Name:      displayName,
+		ScraperID: scraperID,
+		AccountID: s.config.TenantID,
+		UserType:  "User",
+		Email:     user.GetMail(),
+		CreatedAt: lo.FromPtr(user.GetCreatedDateTime()),
+		DeletedAt: user.GetDeletedDateTime(),
+	}
+
+	if !selector.Matches(externalUser) {
+		return v1.ScrapeResult{}, nil
+	}
+
+	return v1.ScrapeResult{
+		BaseScraper:   s.config.BaseScraper,
+		ExternalUsers: []models.ExternalUser{externalUser},
+	}, nil
+}
+
+func (s *Scraper) fetchGroups(selectors types.ResourceSelectors) v1.ScrapeResults {
+	if len(selectors) == 0 {
+		return nil
+	}
+
+	logger.Tracef("fetching groups for tenant %s", s.config.TenantID)
+
+	var results v1.ScrapeResults
+	groups, err := s.graphClient.Groups().Get(s.ctx, nil)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to fetch groups: %w", err)})
+	}
+
+	pageIterator, err := graphcore.NewPageIterator[msgraphModels.Groupable](groups, s.graphClient.GetAdapter(), nil)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to create page iterator: %w", err)})
+	}
+
+	err = pageIterator.Iterate(s.ctx, func(group msgraphModels.Groupable) bool {
+		result, err := s.groupToScrapeResult(group, selectors)
+		if err != nil {
+			logger.Errorf("failed to convert group to scrape result: %v", err)
+			return true
+		} else if len(result.ExternalGroups) == 0 {
+			return true
+		}
+
+		if members, err := s.fetchGroupMembers(lo.FromPtr(group.GetId())); err != nil {
+			logger.Errorf("failed to fetch group members: %s", err)
+		} else if len(members) > 0 {
+			result.ExternalUserGroups = members
+		}
+
+		results = append(results, result)
+		return true
+	})
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to iterate through pages: %w", err)})
+	}
+
+	return results
+}
+
+func (s *Scraper) groupToScrapeResult(group msgraphModels.Groupable, selector types.ResourceSelectors) (v1.ScrapeResult, error) {
+	groupID, err := uuid.Parse(lo.FromPtr(group.GetId()))
+	if err != nil {
+		return v1.ScrapeResult{}, fmt.Errorf("failed to parse group ID %s: %w", lo.FromPtr(group.GetId()), err)
+	}
+
+	scraperID := uuid.Nil
+	if s.scraperID != "" {
+		scraperID = uuid.MustParse(s.scraperID)
+	}
+
+	externalGroup := models.ExternalGroup{
+		ID:        groupID,
+		AccountID: s.config.TenantID,
+		ScraperID: scraperID,
+		Name:      lo.FromPtr(group.GetDisplayName()),
+		CreatedAt: lo.FromPtr(group.GetCreatedDateTime()),
+		DeletedAt: group.GetDeletedDateTime(),
+	}
+
+	if gt := group.GetGroupTypes(); len(gt) > 0 {
+		externalGroup.GroupType = gt[0]
+	}
+
+	if !selector.Matches(externalGroup) {
+		return v1.ScrapeResult{}, nil
+	}
+
+	return v1.ScrapeResult{
+		ExternalGroups: []models.ExternalGroup{externalGroup},
+	}, nil
+}
+
+func (s *Scraper) fetchGroupMembers(groupID string) ([]models.ExternalUserGroup, error) {
+	groupUUID, err := uuid.Parse(groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse group ID %s: %w", groupID, err)
+	}
+
+	var results []models.ExternalUserGroup
+	members, err := s.graphClient.Groups().ByGroupId(groupID).Members().Get(s.ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch group members: %w", err)
+	}
+
+	pageIterator, err := graphcore.NewPageIterator[msgraphModels.DirectoryObjectable](members, s.graphClient.GetAdapter(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create page iterator: %w", err)
+	}
+
+	err = pageIterator.Iterate(s.ctx, func(member msgraphModels.DirectoryObjectable) bool {
+		memberID, err := uuid.Parse(lo.FromPtr(member.GetId()))
+		if err != nil {
+			logger.Errorf("failed to parse azure group member ID %s: %v", lo.FromPtr(member.GetId()), err)
+			return true
+		}
+
+		ug := models.ExternalUserGroup{
+			ExternalUserID:  memberID,
+			ExternalGroupID: groupUUID,
+		}
+		results = append(results, ug)
+		return true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to iterate through pages: %w", err)
+	}
+
+	return results, nil
+}
+
+func (s *Scraper) fetchAppRegistrations(selectors types.ResourceSelectors) v1.ScrapeResults {
+	if len(selectors) == 0 {
+		return nil
+	}
+
+	logger.Tracef("fetching app registrations for tenant %s", s.config.TenantID)
+
+	var results v1.ScrapeResults
+
+	requestParameters := &applications.ApplicationsRequestBuilderGetQueryParameters{
+		Select: []string{"id", "appId", "displayName", "passwordCredentials", "keyCredentials"},
+	}
+	requestConfig := &applications.ApplicationsRequestBuilderGetRequestConfiguration{
+		QueryParameters: requestParameters,
+	}
+
+	apps, err := s.graphClient.Applications().Get(s.ctx, requestConfig)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to fetch app registrations: %w", err)})
+	}
+
+	pageIterator, err := graphcore.NewPageIterator[*msgraphModels.Application](apps, s.graphClient.GetAdapter(), applications.CreateDeltaGetResponseFromDiscriminatorValue)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to create page iterator: %w", err)})
+	}
+
+	err = pageIterator.Iterate(s.ctx, func(app *msgraphModels.Application) bool {
+		appScrapeResult := s.appToScrapeResult(app)
+		if !selectors.Matches(appScrapeResult) {
+			return true
+		}
+		results = append(results, appScrapeResult)
+
+		appRegAppID := lo.FromPtr(app.GetAppId())
+		for _, pc := range app.GetPasswordCredentials() {
+			results = append(results, s.passwordCredentialToScrapeResult(pc, appRegAppID))
+		}
+
+		for _, kc := range app.GetKeyCredentials() {
+			results = append(results, s.keyCredentialToScrapeResult(kc, appRegAppID))
+		}
+
+		results = append(results, s.fetchAppRoles(lo.FromPtr(app.GetId()))...)
+		return true
+	})
+
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to iterate through pages: %w", err)})
+	}
+
+	return results
+}
+
+func (s *Scraper) appToScrapeResult(app *msgraphModels.Application) v1.ScrapeResult {
+	appID := lo.FromPtr(app.GetAppId())
+	displayName := *app.GetDisplayName()
+
+	return v1.ScrapeResult{
+		BaseScraper: s.config.BaseScraper,
+		ID:          appID,
+		Name:        displayName,
+		Config:      app.GetBackingStore().Enumerate(),
+		ConfigClass: "AppRegistration",
+		Type:        ConfigTypePrefix + "AppRegistration",
+		Properties: []*types.Property{
+			{
+				Name: "URL",
+				Icon: ConfigTypePrefix + "AppRegistration",
+				Links: []types.Link{
+					{
+						Text: types.Text{Label: "Console"},
+						URL:  fmt.Sprintf("https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/Overview/appId/%s", appID),
+					},
+				},
+			},
+		},
+	}
+}
+
+func (s *Scraper) passwordCredentialToScrapeResult(cred msgraphModels.PasswordCredentialable, appRegAppID string) v1.ScrapeResult {
+	return v1.ScrapeResult{
+		BaseScraper: s.config.BaseScraper,
+		ID:          lo.FromPtr(cred.GetKeyId()).String(),
+		Name:        lo.FromPtr(cred.GetDisplayName()),
+		ConfigClass: "ClientSecret",
+		Type:        ConfigTypePrefix + "AppRegistration::ClientSecret",
+		Config:      cred.GetBackingStore().Enumerate(),
+		Parents: []v1.ConfigExternalKey{
+			{
+				ExternalID: appRegAppID,
+				Type:       ConfigTypePrefix + "AppRegistration",
+			},
+		},
+	}
+}
+
+func (s *Scraper) keyCredentialToScrapeResult(cred msgraphModels.KeyCredentialable, appRegAppID string) v1.ScrapeResult {
+	config := cred.GetBackingStore().Enumerate()
+
+	if keyID, ok := config["keyId"].([]byte); ok {
+		config["keyId"] = base64.StdEncoding.EncodeToString(keyID)
+	}
+	if customKeyIdentifier, ok := config["customKeyIdentifier"].([]byte); ok {
+		config["customKeyIdentifier"] = base64.StdEncoding.EncodeToString(customKeyIdentifier)
+	}
+
+	return v1.ScrapeResult{
+		BaseScraper: s.config.BaseScraper,
+		ID:          lo.FromPtr(cred.GetKeyId()).String(),
+		Name:        lo.FromPtr(cred.GetDisplayName()),
+		ConfigClass: "ClientCertificate",
+		Type:        ConfigTypePrefix + "AppRegistration::Certificate",
+		Config:      config,
+		Parents: []v1.ConfigExternalKey{
+			{
+				ExternalID: appRegAppID,
+				Type:       ConfigTypePrefix + "AppRegistration",
+			},
+		},
+	}
+}
+
+func (s *Scraper) fetchAppRoles(appObjectID string) v1.ScrapeResults {
+	if !s.config.Includes(IncludeAppRoles) {
+		return nil
+	}
+
+	logger.Tracef("fetching app roles for app %s", appObjectID)
+
+	var results v1.ScrapeResults
+	app, err := s.graphClient.Applications().ByApplicationId(appObjectID).Get(s.ctx, nil)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to fetch application: %w", err)})
+	}
+
+	scraperID := uuid.Nil
+	if s.scraperID != "" {
+		scraperID = uuid.MustParse(s.scraperID)
+	}
+
+	appRoles := app.GetAppRoles()
+	for _, role := range appRoles {
+		if role.GetId() == nil {
+			continue
+		}
+
+		externalRole := v1.ScrapeResult{
+			BaseScraper: s.config.BaseScraper,
+			ExternalRoles: []models.ExternalRole{
+				{
+					ID:          lo.FromPtr(role.GetId()),
+					AccountID:   s.config.TenantID,
+					ScraperID:   &scraperID,
+					Name:        lo.FromPtr(role.GetDisplayName()),
+					Description: lo.FromPtr(role.GetDescription()),
+				},
+			},
+		}
+
+		results = append(results, externalRole)
+	}
+
+	return results
+}
+
+func (s *Scraper) fetchEnterpriseApplications(selectors types.ResourceSelectors) v1.ScrapeResults {
+	if len(selectors) == 0 {
+		return nil
+	}
+
+	logger.Tracef("fetching enterprise applications for tenant %s", s.config.TenantID)
+
+	var results v1.ScrapeResults
+
+	servicePrincipals, err := s.graphClient.ServicePrincipals().Get(s.ctx, nil)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to fetch service principals: %w", err)})
+	}
+
+	pageIterator, err := graphcore.NewPageIterator[msgraphModels.ServicePrincipalable](servicePrincipals, s.graphClient.GetAdapter(), msgraphModels.CreateServicePrincipalCollectionResponseFromDiscriminatorValue)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to create page iterator: %w", err)})
+	}
+
+	err = pageIterator.Iterate(s.ctx, func(sp msgraphModels.ServicePrincipalable) bool {
+		spID := lo.FromPtr(sp.GetId())
+		appID := lo.FromPtr(sp.GetAppId())
+		displayName := *sp.GetDisplayName()
+
+		if orgID := sp.GetAppOwnerOrganizationId(); orgID == nil {
+			return true
+		} else if orgID.String() != s.config.TenantID {
+			return true
+		}
+
+		result := v1.ScrapeResult{
+			BaseScraper: s.config.BaseScraper,
+			ID:          spID,
+			Name:        displayName,
+			Config:      sp.GetBackingStore().Enumerate(),
+			ConfigClass: EnterpriseApplicationType,
+			Type:        ConfigTypePrefix + EnterpriseApplicationType,
+			RelationshipResults: []v1.RelationshipResult{{
+				RelatedConfigID: spID,
+				ConfigID:        appID,
+				Relationship:    "AppServicePrincipal",
+			}},
+		}
+		if !selectors.Matches(result) {
+			return true
+		}
+		results = append(results, result)
+
+		return true
+	})
+
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to iterate through service principals: %w", err)})
+	}
+
+	return results
+}
+
+func (s *Scraper) fetchAllAppRoleAssignments(selectors types.ResourceSelectors) v1.ScrapeResults {
+	if len(selectors) == 0 {
+		return nil
+	}
+
+	// FIXME: Implement app role assignment fetching
+	// This requires querying the DB for existing configs, which we can't do from a plugin
+	// For now, return empty results
+	return nil
+}
+
+func (s *Scraper) fetchAppRoleAssignments(spID uuid.UUID) v1.ScrapeResults {
+	var results v1.ScrapeResults
+
+	query := &serviceprincipals.ItemAppRoleAssignedToRequestBuilderGetRequestConfiguration{
+		QueryParameters: &serviceprincipals.ItemAppRoleAssignedToRequestBuilderGetQueryParameters{
+			Select: []string{"id", "principalId", "principalType", "appRoleId", "resourceId", "createdDateTime", "deletedDateTime"},
+		},
+	}
+	assignments, err := s.graphClient.ServicePrincipals().ByServicePrincipalId(spID.String()).AppRoleAssignedTo().Get(s.ctx, query)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to fetch app role assignments for service principal %s: %w", spID, err)})
+	}
+
+	assignmentIterator, err := graphcore.NewPageIterator[msgraphModels.AppRoleAssignmentable](assignments, s.graphClient.GetAdapter(), nil)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to create assignment iterator for service principal %s: %w", spID, err)})
+	}
+
+	scraperID := uuid.Nil
+	if s.scraperID != "" {
+		scraperID = uuid.MustParse(s.scraperID)
+	}
+
+	var result v1.ScrapeResult
+	err = assignmentIterator.Iterate(s.ctx, func(assignment msgraphModels.AppRoleAssignmentable) bool {
+		principalType := lo.FromPtr(assignment.GetPrincipalType())
+		assignmentID := lo.FromPtr(assignment.GetId())
+
+		switch principalType {
+		case "User":
+			ca := models.ConfigAccess{
+				ID:             assignmentID,
+				ExternalUserID: assignment.GetPrincipalId(),
+				ConfigID:       spID,
+				ScraperID:      &scraperID,
+				CreatedAt:      lo.FromPtr(assignment.GetCreatedDateTime()),
+				DeletedAt:      assignment.GetDeletedDateTime(),
+			}
+			if assignment.GetAppRoleId() != nil && assignment.GetAppRoleId().String() != uuid.Nil.String() {
+				ca.ExternalRoleID = assignment.GetAppRoleId()
+			}
+
+			result.ConfigAccess = append(result.ConfigAccess, v1.ExternalConfigAccess{
+				ConfigAccess: ca,
+			})
+
+		case "Group":
+			ca := models.ConfigAccess{
+				ID:              assignmentID,
+				ExternalGroupID: assignment.GetPrincipalId(),
+				ConfigID:        spID,
+				ScraperID:       &scraperID,
+				CreatedAt:       lo.FromPtr(assignment.GetCreatedDateTime()),
+				DeletedAt:       assignment.GetDeletedDateTime(),
+			}
+			if assignment.GetAppRoleId() != nil && assignment.GetAppRoleId().String() != uuid.Nil.String() {
+				ca.ExternalRoleID = assignment.GetAppRoleId()
+			}
+
+			result.ConfigAccess = append(result.ConfigAccess, v1.ExternalConfigAccess{
+				ConfigAccess: ca,
+			})
+
+		default:
+			logger.Warnf("unknown principal type %s for app role assignment %s", principalType, assignmentID)
+		}
+
+		return true
+	})
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to iterate through app role assignments: %w", err)})
+	}
+
+	results = append(results, result)
+	return results
+}
+
+func (s *Scraper) fetchAuthMethods() v1.ScrapeResults {
+	if !s.config.Includes(IncludeAuthMethods) {
+		return nil
+	}
+
+	logger.Tracef("fetching authentication methods for tenant %s", s.config.TenantID)
+
+	var results v1.ScrapeResults
+	authMethods, err := s.graphClient.Policies().AuthenticationMethodsPolicy().Get(s.ctx, nil)
+	if err != nil {
+		return append(results, v1.ScrapeResult{Error: fmt.Errorf("failed to fetch authentication methods: %w", err)})
+	}
+
+	methods := authMethods.GetAuthenticationMethodConfigurations()
+	for _, method := range methods {
+		methodID := lo.FromPtr(method.GetId())
+
+		results = append(results, v1.ScrapeResult{
+			BaseScraper: s.config.BaseScraper,
+			ScraperLess: true,
+			ID:          methodID,
+			Name:        methodID,
+			Config:      method.GetBackingStore().Enumerate(),
+			Status:      lo.Ternary(lo.FromPtr(method.GetState()) == msgraphModels.ENABLED_AUTHENTICATIONMETHODSTATE, "Enabled", "Disabled"),
+			Health:      lo.Ternary(lo.FromPtr(method.GetState()) == msgraphModels.ENABLED_AUTHENTICATIONMETHODSTATE, models.HealthHealthy, models.HealthUnknown),
+			ConfigClass: "AuthenticationMethod",
+			Type:        ConfigTypePrefix + "AuthenticationMethod",
+		})
+	}
+
+	return results
+}
