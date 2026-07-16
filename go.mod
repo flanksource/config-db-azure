@@ -19,8 +19,8 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/subscription/armsubscription v1.2.0
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/trafficmanager/armtrafficmanager v1.3.0
 	github.com/flanksource/commons v1.44.1
-	github.com/flanksource/config-db v0.0.0
-	github.com/flanksource/duty v1.0.1169
+	github.com/flanksource/config-db v0.0.1418
+	github.com/flanksource/duty v1.0.1352
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/microsoftgraph/msgraph-sdk-go v1.88.0
@@ -428,5 +428,3 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-replace github.com/flanksource/config-db => ../
