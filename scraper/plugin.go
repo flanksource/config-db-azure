@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	v1 "github.com/flanksource/config-db/api/v1"
+	v1 "github.com/flanksource/config-db/api"
 	pluginapi "github.com/flanksource/config-db/api/plugin"
 	pb "github.com/flanksource/config-db/api/plugin/proto"
 )
