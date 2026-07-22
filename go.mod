@@ -157,7 +157,7 @@ require (
 	github.com/flanksource/deps v1.0.35 // indirect
 	github.com/flanksource/gomplate/v3 v3.24.84 // indirect
 	github.com/flanksource/is-healthy v1.0.88 // indirect
-	github.com/flanksource/kopper v1.0.14 // indirect
+	github.com/flanksource/kopper v1.0.27 // indirect
 	github.com/flanksource/kubectl-neat v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
