@@ -154,7 +154,7 @@ require (
 	github.com/flanksource/clicky v1.21.18 // indirect
 	github.com/flanksource/config-db/api v0.0.0
 	github.com/flanksource/config-db/api/plugin v0.0.0
-	github.com/flanksource/deps v1.0.35 // indirect
+	github.com/flanksource/deps v1.0.36 // indirect
 	github.com/flanksource/gomplate/v3 v3.24.84 // indirect
 	github.com/flanksource/is-healthy v1.0.88 // indirect
 	github.com/flanksource/kopper v1.0.14 // indirect
