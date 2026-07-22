@@ -151,7 +151,7 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fergusstrange/embedded-postgres v1.34.0 // indirect
 	github.com/flanksource/artifacts v1.0.24 // indirect
-	github.com/flanksource/clicky v1.21.18 // indirect
+	github.com/flanksource/clicky v1.21.40 // indirect
 	github.com/flanksource/config-db/api v0.0.0
 	github.com/flanksource/config-db/api/plugin v0.0.0
 	github.com/flanksource/deps v1.0.35 // indirect
