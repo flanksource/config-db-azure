@@ -18,8 +18,8 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage v1.8.1
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/subscription/armsubscription v1.2.0
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/trafficmanager/armtrafficmanager v1.3.0
-	github.com/flanksource/commons v1.53.1
-	github.com/flanksource/duty v1.0.1352
+	github.com/flanksource/commons v1.57.0
+	github.com/flanksource/duty v1.0.1380
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/microsoftgraph/msgraph-sdk-go v1.88.0
@@ -151,13 +151,13 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fergusstrange/embedded-postgres v1.34.0 // indirect
 	github.com/flanksource/artifacts v1.0.24 // indirect
-	github.com/flanksource/clicky v1.21.18 // indirect
-	github.com/flanksource/config-db/api v0.0.0
-	github.com/flanksource/config-db/api/plugin v0.0.0
-	github.com/flanksource/deps v1.0.35 // indirect
-	github.com/flanksource/gomplate/v3 v3.24.84 // indirect
-	github.com/flanksource/is-healthy v1.0.88 // indirect
-	github.com/flanksource/kopper v1.0.14 // indirect
+	github.com/flanksource/clicky v1.21.59 // indirect
+	github.com/flanksource/config-db/api v0.0.1460
+	github.com/flanksource/config-db/api/plugin v0.0.1460
+	github.com/flanksource/deps v1.0.42 // indirect
+	github.com/flanksource/gomplate/v3 v3.24.89 // indirect
+	github.com/flanksource/is-healthy v1.0.91 // indirect
+	github.com/flanksource/kopper v1.0.31 // indirect
 	github.com/flanksource/kubectl-neat v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
